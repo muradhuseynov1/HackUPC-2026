@@ -414,15 +414,18 @@ def dispatch_tool_call(name: str, arguments: dict[str, Any]) -> str:
 # REACT CHAT LOOP
 # ═══════════════════════════════════════════════════════════════════════════
 
-def run_chat(user_message: str, chat_history: list[dict]) -> str:
+def run_chat(user_message: str, chat_history: list[dict]) -> tuple[str, list[dict]]:
+    """Run the ReAct loop. Returns (final_answer, reasoning_trace)."""
+    trace: list[dict] = []  # collects every intermediate step
+
     try:
         from openai import OpenAI
     except ImportError:
-        return "[CRITICAL] OpenAI package not installed. Run: `pip install openai`"
+        return ("[CRITICAL] OpenAI package not installed. Run: `pip install openai`", trace)
 
     api_key = st.session_state.get("openai_api_key", "")
     if not api_key:
-        return "[INFO] Please enter your OpenAI API key in the sidebar."
+        return ("[INFO] Please enter your OpenAI API key in the sidebar.", trace)
 
     client = OpenAI(api_key=api_key)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -437,7 +440,7 @@ def run_chat(user_message: str, chat_history: list[dict]) -> str:
     messages.append({"role": "user", "content": user_message})
 
     # ReAct loop — up to 5 rounds of tool calls
-    for _ in range(5):
+    for iteration in range(5):
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -447,11 +450,15 @@ def run_chat(user_message: str, chat_history: list[dict]) -> str:
                 temperature=0.1,
             )
         except Exception as e:
-            return f"[CRITICAL] OpenAI API error: {e}"
+            return (f"[CRITICAL] OpenAI API error: {e}", trace)
 
         choice = response.choices[0]
 
         if choice.finish_reason == "tool_calls" or choice.message.tool_calls:
+            # Save the AI's intermediate thought (if any)
+            if choice.message.content:
+                trace.append({"step": "thought", "content": choice.message.content})
+
             messages.append(choice.message)
             for tool_call in choice.message.tool_calls:
                 fn_name = tool_call.function.name
@@ -459,7 +466,23 @@ def run_chat(user_message: str, chat_history: list[dict]) -> str:
                     fn_args = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError:
                     fn_args = {}
+
+                # Save the tool call
+                trace.append({
+                    "step": "tool_call",
+                    "tool": fn_name,
+                    "arguments": fn_args,
+                })
+
                 result = dispatch_tool_call(fn_name, fn_args)
+
+                # Save the tool result (truncated for readability)
+                trace.append({
+                    "step": "tool_result",
+                    "tool": fn_name,
+                    "result_preview": result[:500] + ("..." if len(result) > 500 else ""),
+                })
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -467,9 +490,25 @@ def run_chat(user_message: str, chat_history: list[dict]) -> str:
                 })
             continue
 
-        return choice.message.content or "[INFO] No response generated."
+        return (choice.message.content or "[INFO] No response generated.", trace)
 
-    return "[WARNING] Maximum ReAct iterations reached."
+    return ("[WARNING] Maximum ReAct iterations reached.", trace)
+
+
+def _format_trace(trace: list[dict]) -> str:
+    """Format the reasoning trace as readable markdown."""
+    if not trace:
+        return "_No intermediate reasoning steps._"
+    lines = []
+    for i, step in enumerate(trace, 1):
+        if step["step"] == "thought":
+            lines.append(f"**💭 Thought:** {step['content']}")
+        elif step["step"] == "tool_call":
+            args_str = json.dumps(step["arguments"], indent=2)
+            lines.append(f"**🔧 Tool Call:** `{step['tool']}({args_str})`")
+        elif step["step"] == "tool_result":
+            lines.append(f"**📋 Result from `{step['tool']}`:**\n```json\n{step['result_preview']}\n```")
+    return "\n\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -611,11 +650,18 @@ if user_input:
 
     with st.chat_message("assistant"):
         with st.spinner("ReAct reasoning..."):
-            response = run_chat(user_input, st.session_state["chat_history"])
+            response, trace = run_chat(user_input, st.session_state["chat_history"])
         _render_message(response)
+        if trace:
+            with st.expander("🧠 Reasoning Trace", expanded=False):
+                st.markdown(_format_trace(trace))
 
     st.session_state["chat_history"].append({"role": "assistant", "content": response})
     _save_chat_message("assistant", response)
+    if trace:
+        trace_text = _format_trace(trace)
+        st.session_state["chat_history"].append({"role": "assistant", "content": f"[TRACE]\n{trace_text}"})
+        _save_chat_message("assistant", f"[TRACE]\n{trace_text}")
 
 # --- Quick-action buttons ---
 st.markdown("---")
@@ -643,7 +689,11 @@ if "_quick" in st.session_state:
     quick_msg = st.session_state.pop("_quick")
     st.session_state["chat_history"].append({"role": "user", "content": quick_msg})
     _save_chat_message("user", quick_msg)
-    response = run_chat(quick_msg, st.session_state["chat_history"])
+    response, trace = run_chat(quick_msg, st.session_state["chat_history"])
     st.session_state["chat_history"].append({"role": "assistant", "content": response})
     _save_chat_message("assistant", response)
+    if trace:
+        trace_text = _format_trace(trace)
+        st.session_state["chat_history"].append({"role": "assistant", "content": f"[TRACE]\n{trace_text}"})
+        _save_chat_message("assistant", f"[TRACE]\n{trace_text}")
     st.rerun()
