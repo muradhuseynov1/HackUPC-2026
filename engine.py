@@ -28,6 +28,7 @@ import numpy as np
 # Phase 1 model lives in model.py
 from model import Engine as PhysicsEngine
 from model import Inputs
+from typing import Callable
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -36,6 +37,27 @@ DB_PATH = Path(__file__).parent / "telemetry.db"
 CONFIG_PATH = Path(__file__).parent / "sim_config.json"
 
 TICK_INTERVAL_S = 1.0  # real-world seconds between ticks
+
+
+# ---------------------------------------------------------------------------
+# Simulation Configuration (Phase 2 Data Contract)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SimulationConfig:
+    """Configuration that bounds and controls the simulation run."""
+
+    total_duration: float
+    """Maximum total simulated time to model (e.g., total hours)."""
+
+    time_step: float
+    """Time interval advanced per simulation tick."""
+
+    environmental_profile: Callable | None = None
+    """
+    A callable(printer_state) -> dict with keys 'temp', 'load', 'contamination'.
+    If None, the built-in StateMachine profiles are used.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +171,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS telemetry_log (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp       TEXT    NOT NULL,
+            sim_time    REAL    NOT NULL,
             run_id          TEXT    NOT NULL,
             printer_state   TEXT    NOT NULL,
             temperature     REAL    NOT NULL,
@@ -169,6 +192,7 @@ def _insert_row(
     run_id: str,
     printer_state: str,
     timestamp: str,
+    sim_time: float,
     temperature: float,
     load: float,
     contamination: float,
@@ -180,14 +204,15 @@ def _insert_row(
     conn.execute(
         """
         INSERT INTO telemetry_log
-            (timestamp, run_id, printer_state,
+            (timestamp, sim_time, run_id, printer_state,
              temperature, load, contamination,
              blade_health, nozzle_health, heater_health,
              failure_log)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             timestamp,
+            sim_time,
             run_id,
             printer_state,
             temperature,
@@ -298,11 +323,12 @@ class ProactiveAgent:
 # Main simulation loop
 # ---------------------------------------------------------------------------
 
-async def run_simulation() -> None:
-    """Async loop: tick state machine, add noise, run physics, persist."""
+async def run_simulation(config: SimulationConfig) -> None:
+    """Async loop: bounded by SimulationConfig, tick state machine, add noise, run physics, persist."""
 
     run_id = uuid.uuid4().hex[:12]
     print(f"[engine] Starting run {run_id}  (DB: {DB_PATH})")
+    print(f"[engine] Duration: {config.total_duration}  Step: {config.time_step}")
 
     conn = sqlite3.connect(str(DB_PATH))
     _init_db(conn)
@@ -312,8 +338,10 @@ async def run_simulation() -> None:
     agent = ProactiveAgent(critical_threshold=0.15)
     rng = np.random.default_rng(seed=None)  # real randomness for sensor noise
 
+    current_time = 0.0
     tick = 0
-    while True:
+
+    while current_time < config.total_duration:
         tick += 1
         cfg = _read_config()
 
@@ -347,7 +375,7 @@ async def run_simulation() -> None:
         nozzle_h = reports["NozzlePlate"].health_index
         heater_h = reports["HeatingElements"].health_index
 
-        # 5. Proactive Maintenance Agent — evaluate each component
+        # 5. Proactive Maintenance Agent -- evaluate each component
         #    Runs AFTER physics but BEFORE DB write.
         #    If the agent intervenes, it resets health to 1.0 and
         #    also resets the corresponding physics component.
@@ -393,6 +421,7 @@ async def run_simulation() -> None:
             run_id=run_id,
             printer_state=sm.current.value,
             timestamp=now_str,
+            sim_time=round(current_time, 6),
             temperature=round(temperature, 3),
             load=round(load, 3),
             contamination=round(contamination, 4),
@@ -405,12 +434,17 @@ async def run_simulation() -> None:
         # 8. Console heartbeat (every 10 ticks)
         if tick % 10 == 0:
             print(
-                f"  tick {tick:>5}  state={sm.current.value:10s}  "
+                f"  tick {tick:>5}  t={current_time:8.2f}  state={sm.current.value:10s}  "
                 f"T={temperature:6.1f}  L={load:5.2f}  C={contamination:.3f}  "
                 f"blade={blade_h:.3f}  nozzle={nozzle_h:.3f}  heater={heater_h:.3f}"
             )
 
+        # 9. Advance simulated time
+        current_time += config.time_step
         await asyncio.sleep(TICK_INTERVAL_S)
+
+    conn.close()
+    print(f"\n[engine] Simulation complete. {tick} ticks, t={current_time:.2f}")
 
 
 # ---------------------------------------------------------------------------
@@ -418,10 +452,17 @@ async def run_simulation() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # Default SimulationConfig: 500 time-units, 1.0 per tick
+    default_config = SimulationConfig(
+        total_duration=500.0,
+        time_step=1.0,
+    )
+
     print("=" * 60)
     print("  HP Metal Jet S100 - Simulation Engine  (Phase 2)")
+    print(f"  Duration: {default_config.total_duration}  Step: {default_config.time_step}")
     print("=" * 60)
     try:
-        asyncio.run(run_simulation())
+        asyncio.run(run_simulation(default_config))
     except KeyboardInterrupt:
         print("\n[engine] Stopped by user.")
