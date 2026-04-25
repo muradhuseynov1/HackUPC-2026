@@ -1,385 +1,331 @@
 """
-Phase 1 – Mathematical Logic Engine
-=====================================
-Deterministic, rule-based degradation model for three HP Metal Jet S100
-subsystem components: Recoater Blade, Nozzle Plate, and Heating Elements.
+Phase 2 - Simulation Engine (Script A)
+========================================
+Background process that:
+  1. Runs a printer State Machine (IDLE -> HEATING -> PRINTING -> COOLDOWN)
+  2. Generates realistic synthetic telemetry with Gaussian noise
+  3. Feeds each tick into the Phase 1 mathematical model
+  4. Persists every row to a shared SQLite database
 
-No AI/ML, PINNs, or stochastic models. Classical math only.
+Run:  python engine.py
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+import sqlite3
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 
-# ──────────────────────────────────────────────
-# 2.1  Global Data Contracts – Inputs
-# ──────────────────────────────────────────────
+# Phase 1 model lives in model.py
+from model import Engine as PhysicsEngine
+from model import Inputs
 
-@dataclass(frozen=True)
-class Inputs:
-    """Standardized environmental & operational vector for a single time step."""
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+DB_PATH = Path(__file__).parent / "telemetry.db"
+CONFIG_PATH = Path(__file__).parent / "sim_config.json"
 
-    temperature_stress: float
-    """Ambient / internal temperature variance (°C)."""
-
-    contamination: float
-    """Powder purity / air moisture – 0.0 (clean) … 1.0 (highly contaminated)."""
-
-    operational_load: float
-    """Hours of active printing or cycles completed in the current step."""
-
-    maintenance_level: float
-    """Care coefficient – 0.0 (no maintenance) … 1.0 (perfect maintenance)."""
-
-    def __post_init__(self) -> None:
-        if not 0.0 <= self.contamination <= 1.0:
-            raise ValueError(
-                f"contamination must be in [0, 1], got {self.contamination}"
-            )
-        if not 0.0 <= self.maintenance_level <= 1.0:
-            raise ValueError(
-                f"maintenance_level must be in [0, 1], got {self.maintenance_level}"
-            )
-        if self.operational_load < 0.0:
-            raise ValueError(
-                f"operational_load must be >= 0, got {self.operational_load}"
-            )
+TICK_INTERVAL_S = 1.0  # real-world seconds between ticks
 
 
-# ──────────────────────────────────────────────
-# 2.2  Global Data Contracts – Outputs
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Printer State Machine
+# ---------------------------------------------------------------------------
 
-class OperationalStatus(Enum):
-    """Discrete health bucket derived from the continuous health_index."""
+class PrinterState(Enum):
+    """
+    The printer cycles through four phases in order:
+        IDLE  ->  HEATING  ->  PRINTING  ->  COOLDOWN  -> (back to IDLE)
 
-    FUNCTIONAL = "FUNCTIONAL"
-    DEGRADED = "DEGRADED"
-    CRITICAL = "CRITICAL"
-    FAILED = "FAILED"
+    Each state defines baseline temperature, load, and contamination,
+    plus the duration (in ticks) before transitioning to the next state.
+    """
+    IDLE = "IDLE"
+    HEATING = "HEATING"
+    PRINTING = "PRINTING"
+    COOLDOWN = "COOLDOWN"
 
 
-def _health_to_status(health: float) -> OperationalStatus:
-    """Map a health_index ∈ [0, 1] to an OperationalStatus."""
-    if health > 0.7:
-        return OperationalStatus.FUNCTIONAL
-    if health > 0.3:
-        return OperationalStatus.DEGRADED
-    if health > 0.0:
-        return OperationalStatus.CRITICAL
-    return OperationalStatus.FAILED
+# base profiles: (temperature_C, load, contamination, duration_ticks)
+_STATE_PROFILES: dict[PrinterState, dict[str, Any]] = {
+    PrinterState.IDLE: {
+        "temp": 25.0,
+        "load": 0.0,
+        "contamination": 0.05,
+        "duration": 10,
+    },
+    PrinterState.HEATING: {
+        "temp": 180.0,   # temperature rises sharply toward target
+        "load": 5.0,     # load spikes during ramp-up
+        "contamination": 0.1,
+        "duration": 15,
+    },
+    PrinterState.PRINTING: {
+        "temp": 180.0,   # plateaus at target
+        "load": 8.0,     # steady high load
+        "contamination": 0.25,
+        "duration": 60,
+    },
+    PrinterState.COOLDOWN: {
+        "temp": 25.0,    # drops back exponentially
+        "load": 0.5,
+        "contamination": 0.08,
+        "duration": 20,
+    },
+}
+
+_STATE_ORDER = [
+    PrinterState.IDLE,
+    PrinterState.HEATING,
+    PrinterState.PRINTING,
+    PrinterState.COOLDOWN,
+]
 
 
 @dataclass
-class StateReport:
-    """Output state for a single component after one time step."""
-
-    health_index: float
-    """Normalized value: 1.0 (perfect) … 0.0 (completely broken)."""
-
-    operational_status: OperationalStatus
-    """Discrete status derived from health_index."""
-
-    metrics: dict[str, Any]
-    """Component-specific custom physical variables."""
-
-
-# ──────────────────────────────────────────────
-# 3.  Component Base Class
-# ──────────────────────────────────────────────
-
-class Component(ABC):
-    """Abstract base for every degradable subsystem component."""
-
-    name: str
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self._health: float = 1.0  # start at perfect health
-
-    @property
-    def health(self) -> float:
-        return self._health
-
-    @health.setter
-    def health(self, value: float) -> None:
-        self._health = max(0.0, min(1.0, value))
-
-    @abstractmethod
-    def update(self, inputs: Inputs) -> StateReport:
-        """Apply one time-step of degradation and return the new state."""
-        ...
-
-    def _make_report(self, metrics: dict[str, Any]) -> StateReport:
-        return StateReport(
-            health_index=round(self._health, 6),
-            operational_status=_health_to_status(self._health),
-            metrics=metrics,
-        )
-
-    def reset(self) -> None:
-        """Restore component to factory-new condition."""
-        self._health = 1.0
-
-
-# ──────────────────────────────────────────────
-# 3.1  Recoater Blade  (Linear Decay)
-# ──────────────────────────────────────────────
-
-class RecoaterBlade(Component):
+class StateMachine:
     """
-    Subsystem: Recoating
-    Failure mode: Abrasive Wear
-    Primary input driver: **contamination**
-
-    Degradation math — Linear Decay driven by Contamination
-    --------------------------------------------------------
-    Higher contamination (powder impurity / humidity) causes
-    exponentially faster abrasive wear on the blade.
-
-    Custom metric: blade_thickness_mm
-        starts at 2.0 mm, fails at 1.5 mm
+    Tracks which phase the printer is in and how many ticks remain before
+    the next transition.  Provides smoothed driver values (e.g. exponential
+    ramp for HEATING / COOLDOWN instead of instant jumps).
     """
+    current: PrinterState = PrinterState.IDLE
+    ticks_in_state: int = 0
+    _prev_temp: float = 25.0
 
-    INITIAL_THICKNESS_MM: float = 2.0
-    FAIL_THICKNESS_MM: float = 1.5
+    def tick(self) -> dict[str, float]:
+        """Advance one tick and return the base (noise-free) driver values."""
+        profile = _STATE_PROFILES[self.current]
+        duration = profile["duration"]
+        self.ticks_in_state += 1
 
-    # Tuning constants
-    BASE_WEAR_RATE: float = 0.01    # baseline health loss per step
-    CONTAMINATION_EXP: float = 2.0  # exponent for contamination driver
-
-    def __init__(self) -> None:
-        super().__init__(name="RecoaterBlade")
-        self.blade_thickness_mm: float = self.INITIAL_THICKNESS_MM
-
-    def update(self, inputs: Inputs) -> StateReport:
-        # Primary driver: contamination drives wear exponentially
-        wear = self.BASE_WEAR_RATE * (1.0 + inputs.contamination ** self.CONTAMINATION_EXP * 5.0)
-
-        self.health -= wear
-
-        # Map health linearly to blade thickness
-        thickness_range = self.INITIAL_THICKNESS_MM - self.FAIL_THICKNESS_MM
-        self.blade_thickness_mm = (
-            self.FAIL_THICKNESS_MM + self._health * thickness_range
-        )
-
-        return self._make_report(
-            {"blade_thickness_mm": round(self.blade_thickness_mm, 4)}
-        )
-
-    def reset(self) -> None:
-        super().reset()
-        self.blade_thickness_mm = self.INITIAL_THICKNESS_MM
-
-
-# ──────────────────────────────────────────────
-# 3.2  Nozzle Plate  (Weibull-inspired / Threshold)
-# ──────────────────────────────────────────────
-
-class NozzlePlate(Component):
-    """
-    Subsystem: Printhead Array
-    Failure mode: Clogging & Thermal Fatigue
-    Primary input driver: **temperature_stress**
-
-    Degradation math — Weibull-inspired / Threshold-based Decay
-    ------------------------------------------------------------
-    If temperature stress exceeds an optimal bound the health
-    drops sharply via a Weibull hazard function.
-
-    Custom metric: clogging_percentage
-        starts at 0.0 %, fails at 100.0 %
-    """
-
-    OPTIMAL_TEMP: float = 25.0     # deg-C optimal operating variance
-    TEMP_SHAPE: float = 2.5        # Weibull shape parameter (beta)
-    TEMP_SCALE: float = 50.0       # Weibull scale parameter (eta, deg-C)
-    BASE_WEAR_RATE: float = 0.005  # small baseline health loss per step
-
-    def __init__(self) -> None:
-        super().__init__(name="NozzlePlate")
-        self.clogging_percentage: float = 0.0
-
-    def update(self, inputs: Inputs) -> StateReport:
-        # Primary driver: temperature_stress
-        temp_excess = max(0.0, abs(inputs.temperature_stress) - self.OPTIMAL_TEMP)
-
-        # Weibull hazard contribution: (beta/eta) * (x/eta)^(beta-1)
-        if temp_excess > 0.0:
-            thermal_damage = (
-                (self.TEMP_SHAPE / self.TEMP_SCALE)
-                * (temp_excess / self.TEMP_SCALE) ** (self.TEMP_SHAPE - 1)
-            )
+        # --- Temperature smoothing ---
+        target_temp = profile["temp"]
+        if self.current == PrinterState.HEATING:
+            # exponential approach toward target
+            alpha = 1 - math.exp(-3.0 * self.ticks_in_state / duration)
+            temp = 25.0 + (target_temp - 25.0) * alpha
+        elif self.current == PrinterState.COOLDOWN:
+            # exponential decay from previous temp back to 25 C
+            alpha = math.exp(-3.0 * self.ticks_in_state / duration)
+            temp = 25.0 + (self._prev_temp - 25.0) * alpha
         else:
-            thermal_damage = 0.0
+            temp = target_temp
 
-        total_damage = self.BASE_WEAR_RATE + thermal_damage
-        self.health -= total_damage
+        load = profile["load"]
+        contamination = profile["contamination"]
 
-        # Clogging is the inverse of health
-        self.clogging_percentage = (1.0 - self._health) * 100.0
+        # --- Transition logic ---
+        if self.ticks_in_state >= duration:
+            idx = _STATE_ORDER.index(self.current)
+            self._prev_temp = temp
+            self.current = _STATE_ORDER[(idx + 1) % len(_STATE_ORDER)]
+            self.ticks_in_state = 0
 
-        return self._make_report(
-            {"clogging_percentage": round(self.clogging_percentage, 4)}
-        )
-
-    def reset(self) -> None:
-        super().reset()
-        self.clogging_percentage = 0.0
-
-
-# ──────────────────────────────────────────────
-# 3.3  Heating Elements  (Exponential Decay)
-# ──────────────────────────────────────────────
-
-class HeatingElements(Component):
-    """
-    Subsystem: Thermal Control
-    Failure mode: Electrical Degradation
-    Primary input driver: **operational_load**
-
-    Degradation math — Standard Exponential Decay
-    -----------------------------------------------
-    H(t) = e^(-lambda * t)  where t is cumulative operational_load.
-
-    Custom metric: resistance_ohms
-        starts at 10.0 Ohms, fails at > 15.0 Ohms
-    """
-
-    INITIAL_RESISTANCE: float = 10.0
-    FAIL_RESISTANCE: float = 15.0
-    BASE_LAMBDA: float = 0.008  # decay constant per unit operational_load
-
-    def __init__(self) -> None:
-        super().__init__(name="HeatingElements")
-        self.resistance_ohms: float = self.INITIAL_RESISTANCE
-        self._cumulative_load: float = 0.0
-
-    def update(self, inputs: Inputs) -> StateReport:
-        # Primary driver: operational_load accumulates over time
-        self._cumulative_load += inputs.operational_load
-
-        # Standard exponential decay: H(t) = e^(-lambda * t)
-        self.health = math.exp(-self.BASE_LAMBDA * self._cumulative_load)
-
-        # Resistance rises as health falls
-        resistance_range = self.FAIL_RESISTANCE - self.INITIAL_RESISTANCE
-        self.resistance_ohms = (
-            self.INITIAL_RESISTANCE + (1.0 - self._health) * resistance_range
-        )
-
-        return self._make_report(
-            {"resistance_ohms": round(self.resistance_ohms, 4)}
-        )
-
-    def reset(self) -> None:
-        super().reset()
-        self.resistance_ohms = self.INITIAL_RESISTANCE
-        self._cumulative_load = 0.0
-
-
-# ──────────────────────────────────────────────
-# 4.  Engine – top-level orchestrator
-# ──────────────────────────────────────────────
-
-class Engine:
-    """
-    Main Logic Engine.
-
-    Manages a set of components and advances them through time
-    steps deterministically.
-    """
-
-    def __init__(self) -> None:
-        self.components: list[Component] = [
-            RecoaterBlade(),
-            NozzlePlate(),
-            HeatingElements(),
-        ]
-        self._step: int = 0
-
-    def update_state(self, inputs: Inputs) -> dict[str, StateReport]:
-        """
-        Apply one time-step of degradation to every component.
-
-        Parameters
-        ----------
-        inputs : Inputs
-            Environmental & operational vector for this step.
-
-        Returns
-        -------
-        dict[str, StateReport]
-            Mapping of component name → its updated state report.
-        """
-        self._step += 1
-        reports: dict[str, StateReport] = {}
-        for component in self.components:
-            report = component.update(inputs)
-            reports[component.name] = report
-        return reports
-
-    def get_all_states(self) -> dict[str, StateReport]:
-        """Return the current state of every component without advancing."""
         return {
-            comp.name: comp._make_report(self._current_metrics(comp))
-            for comp in self.components
+            "temperature": temp,
+            "load": load,
+            "contamination": contamination,
         }
 
-    def reset(self) -> None:
-        """Reset every component to factory-new."""
-        self._step = 0
-        for comp in self.components:
-            comp.reset()
 
-    @property
-    def step(self) -> int:
-        return self._step
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
 
-    # ----- helpers -----
+def _init_db(conn: sqlite3.Connection) -> None:
+    """Create the telemetry_log table if it does not exist."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS telemetry_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       TEXT    NOT NULL,
+            run_id          TEXT    NOT NULL,
+            printer_state   TEXT    NOT NULL,
+            temperature     REAL    NOT NULL,
+            load            REAL    NOT NULL,
+            contamination   REAL    NOT NULL,
+            blade_health    REAL    NOT NULL,
+            nozzle_health   REAL    NOT NULL,
+            heater_health   REAL    NOT NULL,
+            failure_log     TEXT
+        )
+    """)
+    conn.commit()
 
-    @staticmethod
-    def _current_metrics(comp: Component) -> dict[str, Any]:
-        if isinstance(comp, RecoaterBlade):
-            return {"blade_thickness_mm": round(comp.blade_thickness_mm, 4)}
-        if isinstance(comp, NozzlePlate):
-            return {"clogging_percentage": round(comp.clogging_percentage, 4)}
-        if isinstance(comp, HeatingElements):
-            return {"resistance_ohms": round(comp.resistance_ohms, 4)}
-        return {}
+
+def _insert_row(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    printer_state: str,
+    timestamp: str,
+    temperature: float,
+    load: float,
+    contamination: float,
+    blade_health: float,
+    nozzle_health: float,
+    heater_health: float,
+    failure_log: str | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO telemetry_log
+            (timestamp, run_id, printer_state,
+             temperature, load, contamination,
+             blade_health, nozzle_health, heater_health,
+             failure_log)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            timestamp,
+            run_id,
+            printer_state,
+            temperature,
+            load,
+            contamination,
+            blade_health,
+            nozzle_health,
+            heater_health,
+            failure_log,
+        ),
+    )
+    conn.commit()
 
 
-# ──────────────────────────────────────────────
-# Quick smoke test (runs only when executed directly)
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Config reader (sidebar writes, engine reads)
+# ---------------------------------------------------------------------------
+
+def _read_config() -> dict[str, Any]:
+    """
+    Read user-adjustable parameters written by the Streamlit sidebar.
+    Returns sensible defaults if the file does not exist yet.
+    """
+    defaults = {
+        "base_temperature_offset": 0.0,
+        "production_volume": 1.0,       # multiplier on load
+        "inject_thermal_anomaly": False,
+    }
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                data = json.load(f)
+            defaults.update(data)
+            # Reset one-shot flags after reading
+            if data.get("inject_thermal_anomaly"):
+                data["inject_thermal_anomaly"] = False
+                with open(CONFIG_PATH, "w") as f:
+                    json.dump(data, f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return defaults
+
+
+# ---------------------------------------------------------------------------
+# Main simulation loop
+# ---------------------------------------------------------------------------
+
+async def run_simulation() -> None:
+    """Async loop: tick state machine, add noise, run physics, persist."""
+
+    run_id = uuid.uuid4().hex[:12]
+    print(f"[engine] Starting run {run_id}  (DB: {DB_PATH})")
+
+    conn = sqlite3.connect(str(DB_PATH))
+    _init_db(conn)
+
+    physics = PhysicsEngine()
+    sm = StateMachine()
+    rng = np.random.default_rng(seed=None)  # real randomness for sensor noise
+
+    tick = 0
+    while True:
+        tick += 1
+        cfg = _read_config()
+
+        # 1. State machine produces base drivers
+        base = sm.tick()
+
+        # 2. Apply user config offsets
+        temperature = base["temperature"] + cfg["base_temperature_offset"]
+        load = base["load"] * cfg["production_volume"]
+        contamination = base["contamination"]
+
+        # Thermal anomaly: spike temp for this tick
+        if cfg.get("inject_thermal_anomaly"):
+            temperature += 120.0  # massive spike
+
+        # 3. Gaussian noise for realistic sensor variance
+        temperature += rng.normal(0, 1.5)
+        load = max(0.0, load + rng.normal(0, 0.3))
+        contamination = float(np.clip(contamination + rng.normal(0, 0.02), 0.0, 1.0))
+
+        # 4. Build Phase 1 Inputs and run physics
+        inputs = Inputs(
+            temperature_stress=temperature,
+            contamination=contamination,
+            operational_load=load,
+            maintenance_level=0.6,  # fixed maintenance schedule
+        )
+        reports = physics.update_state(inputs)
+
+        blade_h = reports["RecoaterBlade"].health_index
+        nozzle_h = reports["NozzlePlate"].health_index
+        heater_h = reports["HeatingElements"].health_index
+
+        # 5. Build failure log string
+        failures: list[str] = []
+        now_str = datetime.now(timezone.utc).isoformat()
+        for name, rpt in reports.items():
+            if rpt.operational_status.value == "FAILED":
+                failures.append(f"[{now_str}] {name} FAILED.")
+        failure_log = " | ".join(failures) if failures else None
+
+        # 6. Persist to SQLite
+        _insert_row(
+            conn,
+            run_id=run_id,
+            printer_state=sm.current.value,
+            timestamp=now_str,
+            temperature=round(temperature, 3),
+            load=round(load, 3),
+            contamination=round(contamination, 4),
+            blade_health=blade_h,
+            nozzle_health=nozzle_h,
+            heater_health=heater_h,
+            failure_log=failure_log,
+        )
+
+        # 7. Console heartbeat (every 10 ticks)
+        if tick % 10 == 0:
+            print(
+                f"  tick {tick:>5}  state={sm.current.value:10s}  "
+                f"T={temperature:6.1f}  L={load:5.2f}  C={contamination:.3f}  "
+                f"blade={blade_h:.3f}  nozzle={nozzle_h:.3f}  heater={heater_h:.3f}"
+            )
+
+        await asyncio.sleep(TICK_INTERVAL_S)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    engine = Engine()
-
-    sample_inputs = Inputs(
-        temperature_stress=30.0,
-        contamination=0.3,
-        operational_load=10.0,
-        maintenance_level=0.7,
-    )
-
     print("=" * 60)
-    print("  HP Metal Jet S100 - Logic Engine  (Phase 1)")
+    print("  HP Metal Jet S100 - Simulation Engine  (Phase 2)")
     print("=" * 60)
-
-    for step in range(1, 11):
-        reports = engine.update_state(sample_inputs)
-        print(f"\n-- Step {step} --")
-        for name, report in reports.items():
-            print(
-                f"  {name:20s}  "
-                f"health={report.health_index:.4f}  "
-                f"status={report.operational_status.value:12s}  "
-                f"metrics={report.metrics}"
-            )
+    try:
+        asyncio.run(run_simulation())
+    except KeyboardInterrupt:
+        print("\n[engine] Stopped by user.")

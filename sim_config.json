@@ -1,0 +1,5 @@
+{
+  "base_temperature_offset": 13.0,
+  "production_volume": 2.4,
+  "inject_thermal_anomaly": false
+}
