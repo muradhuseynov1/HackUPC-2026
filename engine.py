@@ -180,9 +180,18 @@ def _init_db(conn: sqlite3.Connection) -> None:
             blade_health    REAL    NOT NULL,
             nozzle_health   REAL    NOT NULL,
             heater_health   REAL    NOT NULL,
+            blade_thickness REAL,
+            nozzle_clogging REAL,
+            heater_resistance REAL,
             failure_log     TEXT
         )
     """)
+    # Add metric columns to legacy DBs that lack them
+    for col, col_type in [("blade_thickness", "REAL"), ("nozzle_clogging", "REAL"), ("heater_resistance", "REAL")]:
+        try:
+            conn.execute(f"ALTER TABLE telemetry_log ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
 
 
@@ -199,7 +208,10 @@ def _insert_row(
     blade_health: float,
     nozzle_health: float,
     heater_health: float,
-    failure_log: str | None,
+    blade_thickness: float | None = None,
+    nozzle_clogging: float | None = None,
+    heater_resistance: float | None = None,
+    failure_log: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -207,8 +219,9 @@ def _insert_row(
             (timestamp, sim_time, run_id, printer_state,
              temperature, load, contamination,
              blade_health, nozzle_health, heater_health,
+             blade_thickness, nozzle_clogging, heater_resistance,
              failure_log)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             timestamp,
@@ -221,6 +234,9 @@ def _insert_row(
             blade_health,
             nozzle_health,
             heater_health,
+            blade_thickness,
+            nozzle_clogging,
+            heater_resistance,
             failure_log,
         ),
     )
@@ -416,6 +432,11 @@ async def run_simulation(config: SimulationConfig) -> None:
             print(f"  ** {log_msg}")
 
         # 7. Persist to SQLite
+        # Extract component-specific physical metrics from reports
+        blade_metrics = reports["RecoaterBlade"].metrics
+        nozzle_metrics = reports["NozzlePlate"].metrics
+        heater_metrics = reports["HeatingElements"].metrics
+
         _insert_row(
             conn,
             run_id=run_id,
@@ -428,6 +449,9 @@ async def run_simulation(config: SimulationConfig) -> None:
             blade_health=blade_h,
             nozzle_health=nozzle_h,
             heater_health=heater_h,
+            blade_thickness=blade_metrics.get("blade_thickness_mm"),
+            nozzle_clogging=nozzle_metrics.get("clogging_percentage"),
+            heater_resistance=heater_metrics.get("resistance_ohms"),
             failure_log=failure_log,
         )
 

@@ -180,6 +180,7 @@ def get_telemetry(
     start_time: str | None = None,
     end_time: str | None = None,
     component_name: str | None = None,
+    run_id: str | None = None,
     limit: int = 30,
 ) -> str:
     if not DB_PATH.exists():
@@ -191,6 +192,8 @@ def get_telemetry(
         conditions.append("timestamp >= ?"); params.append(start_time)
     if end_time:
         conditions.append("timestamp <= ?"); params.append(end_time)
+    if run_id:
+        conditions.append("run_id = ?"); params.append(run_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"SELECT * FROM telemetry_log {where} ORDER BY id DESC LIMIT {limit}"
     try:
@@ -292,6 +295,7 @@ TOOLS = [
                         "type": "string",
                         "description": "'Recoater Blade', 'Nozzle Plate', or 'Heating Elements'.",
                     },
+                    "run_id": {"type": "string", "description": "Filter by simulation run ID for multi-scenario comparison."},
                     "limit": {"type": "integer", "description": "Max rows (default 30)."},
                 },
                 "required": [],
@@ -390,6 +394,7 @@ def dispatch_tool_call(name: str, arguments: dict[str, Any]) -> str:
             start_time=arguments.get("start_time"),
             end_time=arguments.get("end_time"),
             component_name=arguments.get("component_name"),
+            run_id=arguments.get("run_id"),
             limit=arguments.get("limit", 30),
         )
     elif name == "get_failure_logs":
