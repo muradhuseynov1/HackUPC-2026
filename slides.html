@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HP Metal Jet S100 — Digital Twin</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.6.1/dist/reveal.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.6.1/dist/theme/black.min.css">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap');
+:root{--r-main-font:'Inter',sans-serif;--r-heading-font:'Inter',sans-serif;--r-background-color:#08081a;--r-main-color:#d0d0e8;--r-heading-color:#fff;--r-link-color:#64b5f6}
+
+/* Global bg gradient */
+.reveal{font-family:'Inter',sans-serif;background:radial-gradient(ellipse at 20% 50%,#0d1b3e 0%,#08081a 60%)}
+.reveal h1,.reveal h2,.reveal h3{font-family:'Inter',sans-serif;font-weight:700;text-transform:none;letter-spacing:-0.02em}
+.reveal h1{font-size:2em}
+.reveal h2{font-size:1.4em;margin-bottom:6px}
+.reveal h3{font-size:0.72em;color:#90caf9;margin:0 0 5px 0}
+.reveal p,.reveal li{font-size:0.56em;line-height:1.45;margin:2px 0}
+.reveal ul{margin:4px 0;padding-left:14px}
+.reveal code{background:rgba(100,181,246,0.12);padding:1px 5px;border-radius:4px;font-size:0.9em;color:#90caf9}
+.reveal .slides section{padding:16px 30px;box-sizing:border-box}
+
+/* Accent colors */
+.a1{color:#64b5f6}.a2{color:#81c784}.a3{color:#ffb74d}.a4{color:#f48fb1}
+
+/* Tags */
+.tag{display:inline-block;padding:2px 10px;border-radius:16px;font-size:0.45em;font-weight:600;margin:2px;backdrop-filter:blur(4px)}
+.t1{background:rgba(100,181,246,0.15);color:#64b5f6;border:1px solid rgba(100,181,246,0.3)}
+.t2{background:rgba(129,199,132,0.15);color:#81c784;border:1px solid rgba(129,199,132,0.3)}
+.t3{background:rgba(255,183,77,0.15);color:#ffb74d;border:1px solid rgba(255,183,77,0.3)}
+.t4{background:rgba(244,143,177,0.15);color:#f48fb1;border:1px solid rgba(244,143,177,0.3)}
+
+/* Cards */
+.row{display:flex;gap:10px;justify-content:center;margin:8px 0}
+.c{background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01));border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;flex:1;text-align:left;backdrop-filter:blur(6px)}
+.c h3{margin:0 0 4px 0}
+.c p,.c li{font-size:0.52em;margin:2px 0}
+.c ul{padding-left:12px;margin:3px 0}
+
+/* Diagram box */
+.dia{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:14px 18px;font-family:'Courier New',monospace;font-size:0.48em;line-height:1.55;text-align:left;margin:8px 0}
+
+/* Formula box */
+.f{background:rgba(100,181,246,0.06);border-left:3px solid rgba(100,181,246,0.4);padding:7px 12px;border-radius:0 6px 6px 0;font-family:'Courier New',monospace;font-size:0.52em;margin:5px 0;text-align:left;line-height:1.4}
+
+/* Table */
+table.t{width:100%;border-collapse:collapse;font-size:0.5em;margin:6px 0}
+table.t th{background:rgba(100,181,246,0.12);color:#90caf9;padding:5px 10px;text-align:left;border-bottom:1px solid rgba(100,181,246,0.25);font-weight:600}
+table.t td{padding:4px 10px;border-bottom:1px solid rgba(255,255,255,0.04)}
+
+/* Subtitle */
+.sub{color:#7e8cc0;font-size:0.58em;font-weight:300;margin-top:-4px;margin-bottom:8px}
+
+/* Glow accents */
+.glow-blue{text-shadow:0 0 40px rgba(100,181,246,0.3)}
+.glow-green{text-shadow:0 0 40px rgba(129,199,132,0.3)}
+.glow-orange{text-shadow:0 0 40px rgba(255,183,77,0.3)}
+
+/* Small helper */
+.sm{font-size:0.48em;color:#888}
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- 1: TITLE -->
+<section>
+<h1 class="glow-blue">🏭 HP Metal Jet S100</h1>
+<h2 style="font-weight:300;color:#7e8cc0;font-size:1.1em">Digital Twin & AI Co-Pilot</h2>
+<p style="margin-top:24px">
+<span class="tag t1">Phase 1: Model</span>
+<span class="tag t2">Phase 2: Simulate</span>
+<span class="tag t3">Phase 3: Interact</span>
+<span class="tag t4">PINN + RL</span>
+</p>
+<p style="font-size:0.5em;color:#555;margin-top:36px">HackUPC 2026 · HP Challenge: <em>When AI Meets Reality</em></p>
+<p style="font-size:0.55em;color:#777;margin-top:8px">Giorgia Barboni · Murad Hüseynov · Riccardo Bastiani</p>
+</section>
+
+<!-- 2: ARCHITECTURE -->
+<section>
+<h2 class="glow-blue">System Architecture</h2>
+<div class="dia">
+┌──────────────────────────────────────────────────────┐<br>
+│  <span class="a3">PHASE 3: AI CO-PILOT</span> (phase3_chat.py)                │<br>
+│  User Query → LLM Agent → 4 Tools → Grounded Reply   │<br>
+├──────────────────────── ▼ ────────────────────────────┤<br>
+│  <span class="a2">PHASE 2: SIMULATION</span> (engine.py + app.py)              │<br>
+│  StateMachine → Noise → Phase1.update() → Agent       │<br>
+│                  ┌──────── ▼ ────────┐                │<br>
+│                  │ <span class="a1">telemetry.db</span>      │                │<br>
+│                  │ (SQLite Historian) │                │<br>
+│                  └───────────────────┘                │<br>
+├──────────────────────── ▼ ────────────────────────────┤<br>
+│  <span class="a4">PHASE 1: PHYSICS ENGINE</span> (model.py)                   │<br>
+│  Inputs → Engine → {Blade, Nozzle, Heater} → Reports  │<br>
+└──────────────────────────────────────────────────────┘
+</div>
+<p class="sm">Each phase consumes the output of the previous · Phase 1 is fully deterministic · All data generated at runtime</p>
+</section>
+
+<!-- 3: PHASE 1 — COMPONENTS -->
+<section>
+<h2><span class="a1">Phase 1:</span> Mathematical Engine</h2>
+<p class="sub">3 subsystems · 3 degradation models · 3 custom metrics</p>
+<div class="row">
+<div class="c" style="border-top:2px solid rgba(100,181,246,0.5)">
+<h3>🔪 Recoater Blade</h3>
+<p><b>Subsystem:</b> Recoating</p>
+<p><b>Model:</b> Linear Wear (Archard)</p>
+<p><b>Driver:</b> <code>contamination</code></p>
+<p><b>Metric:</b> blade_thickness_mm</p>
+<p>2.0mm → 1.5mm (failed)</p>
+</div>
+<div class="c" style="border-top:2px solid rgba(129,199,132,0.5)">
+<h3>🖨️ Nozzle Plate</h3>
+<p><b>Subsystem:</b> Printhead Array</p>
+<p><b>Model:</b> Weibull Hazard</p>
+<p><b>Driver:</b> <code>temperature_stress</code></p>
+<p><b>Metric:</b> clogging_percentage</p>
+<p>0% → 100% (failed)</p>
+</div>
+<div class="c" style="border-top:2px solid rgba(244,143,177,0.5)">
+<h3>🔥 Heating Elements</h3>
+<p><b>Subsystem:</b> Thermal Control</p>
+<p><b>Model:</b> Exponential Decay</p>
+<p><b>Driver:</b> <code>operational_load</code></p>
+<p><b>Metric:</b> resistance_ohms</p>
+<p>10Ω → 15Ω (failed)</p>
+</div>
+</div>
+<p class="sm">Uniform interface: <code>Component.update(Inputs) → StateReport</code> · Drop-in replacement via PINN</p>
+</section>
+
+<!-- 4: PHASE 1 — MATH (COMPACT) -->
+<section>
+<h2><span class="a1">Phase 1:</span> Degradation Formulas</h2>
+<div class="row">
+<div class="c">
+<h3>🔪 Blade — Linear Wear</h3>
+<div class="f">wear = 0.01 × (1 + contam² × 5)<br>health -= wear</div>
+<p class="sm">Quadratic amplification · 6× wear at max</p>
+</div>
+<div class="c">
+<h3>🖨️ Nozzle — Weibull Hazard</h3>
+<div class="f">excess = max(0, |temp| - 25)<br>dmg = (β/η)(excess/η)^(β-1)<br>β=2.5 η=50°C</div>
+<p class="sm">Super-linear thermal fatigue</p>
+</div>
+<div class="c">
+<h3>🔥 Heater — Exp Decay</h3>
+<div class="f">cum_load += load<br>health = e^(-0.008 × cum_load)</div>
+<p class="sm">Classic R(t) = e^(-λt)</p>
+</div>
+</div>
+<div class="row" style="margin-top:4px">
+<div class="c" style="flex:2">
+<h3>📤 Output: StateReport</h3>
+<div style="display:flex;gap:20px;font-size:0.52em">
+<span><b style="color:#81c784">FUNCTIONAL</b> &gt;0.7</span>
+<span><b style="color:#ffb74d">DEGRADED</b> &gt;0.3</span>
+<span><b style="color:#ef5350">CRITICAL</b> &gt;0.0</span>
+<span><b style="color:#b71c1c">FAILED</b> =0.0</span>
+</div>
+</div>
+<div class="c">
+<h3>📥 4 Input Drivers</h3>
+<p class="sm">temperature_stress · contamination<br>operational_load · maintenance_level</p>
+</div>
+</div>
+</section>
+
+<!-- 5: PHASE 2 — SIMULATION -->
+<section>
+<h2 class="glow-green"><span class="a2">Phase 2:</span> Simulation Engine</h2>
+<p class="sub">Real-time streaming · State machine · SQLite historian</p>
+<div class="row">
+<div class="c" style="flex:1.6">
+<h3>🔄 Printer State Machine</h3>
+<table class="t">
+<tr><th>State</th><th>Temp</th><th>Load</th><th>Contam</th><th>Ticks</th></tr>
+<tr><td>IDLE</td><td>25°C</td><td>0.0</td><td>0.05</td><td>10</td></tr>
+<tr><td>HEATING</td><td>→180°C</td><td>5.0</td><td>0.10</td><td>15</td></tr>
+<tr><td>PRINTING</td><td>180°C</td><td>8.0</td><td>0.25</td><td>60</td></tr>
+<tr><td>COOLDOWN</td><td>→25°C</td><td>0.5</td><td>0.08</td><td>20</td></tr>
+</table>
+<p class="sm">Exponential temp smoothing during transitions</p>
+</div>
+<div class="c">
+<h3>📡 Per-Tick Pipeline</h3>
+<div class="f">1. StateMachine.tick()<br>2. + Gaussian noise<br>3. Phase1.update_state()<br>4. ProactiveAgent.eval()<br>5. SQLite INSERT</div>
+<p class="sm">SimulationConfig: duration + time_step + profile</p>
+</div>
+</div>
+</section>
+
+<!-- 6: PHASE 2 — HISTORIAN + AGENT -->
+<section>
+<h2><span class="a2">Phase 2:</span> Historian & Agent</h2>
+<div class="row">
+<div class="c" style="flex:1.4">
+<h3>🗄️ SQLite Historian</h3>
+<table class="t">
+<tr><th>Column</th><th>Purpose</th></tr>
+<tr><td>run_id</td><td>UUID per simulation run</td></tr>
+<tr><td>timestamp / sim_time</td><td>Wall clock + sim time</td></tr>
+<tr><td>temperature, load, contamination</td><td>Drivers (with noise)</td></tr>
+<tr><td>blade/nozzle/heater_health</td><td>Health [0–1]</td></tr>
+<tr><td>*_thickness / *_clogging / *_resistance</td><td>Physical metrics</td></tr>
+<tr><td>failure_log</td><td>Events</td></tr>
+</table>
+</div>
+<div class="c">
+<h3>🛡️ Proactive Agent</h3>
+<div class="f">Δh = prev - current<br>predicted = current - Δh<br>if predicted ≤ 0.15:<br>&nbsp;&nbsp;RESET → health = 1.0<br>&nbsp;&nbsp;log [PROACTIVE]</div>
+<h3 style="margin-top:8px">⚡ Chaos Engineering</h3>
+<p>Thermal anomaly injection (+120°C)</p>
+<p>Temp offset / production volume sliders</p>
+</div>
+</div>
+</section>
+
+<!-- 7: PHASE 3 — AI CO-PILOT -->
+<section>
+<h2 class="glow-orange"><span class="a3">Phase 3:</span> AI Co-Pilot</h2>
+<p class="sub">Pattern C: Agentic Diagnosis (highest tier) · ReAct Loop · GPT-4o-mini</p>
+<div class="dia" style="font-size:0.46em">
+User: "Why is the nozzle plate degrading so fast?"<br><br>
+&nbsp;&nbsp;<span class="a3">Thought:</span> Need to check nozzle health trend and temperature data<br>
+&nbsp;&nbsp;<span class="a1">Action:</span>  get_telemetry(component="Nozzle Plate", limit=20)<br>
+&nbsp;&nbsp;<span class="a2">Observe:</span> {nozzle_health: 0.85→0.32 over 15 ticks, temp: 178°C}<br>
+&nbsp;&nbsp;<span class="a3">Thought:</span> Rapid drop during high temp — check failure logs<br>
+&nbsp;&nbsp;<span class="a1">Action:</span>  get_failure_logs()<br>
+&nbsp;&nbsp;<span class="a2">Observe:</span> {[PROACTIVE] Agent reset NozzlePlate at 0.18 health}<br><br>
+&nbsp;&nbsp;<span class="a3">[WARNING]</span> Based on telemetry at sim_time 145.0, the Nozzle Plate<br>
+&nbsp;&nbsp;health dropped from 0.85 to 0.32 during 15 PRINTING ticks at 178°C…
+</div>
+<p class="sm">Up to 5 iterations · Every response cites timestamps · Reasoning trace visible to operator</p>
+</section>
+
+<!-- 8: PHASE 3 — FEATURES -->
+<section>
+<h2><span class="a3">Phase 3:</span> Features</h2>
+<div class="row">
+<div class="c">
+<h3>🔧 4 Diagnostic Tools</h3>
+<ul>
+<li><code>get_telemetry</code> — query historian</li>
+<li><code>get_failure_logs</code> — events</li>
+<li><code>get_simulation_config</code> — config</li>
+<li><code>adjust_machine_parameter</code></li>
+</ul>
+</div>
+<div class="c">
+<h3>🛡️ Safety Firewall</h3>
+<p>Neurosymbolic: LLM proposes, rules enforce</p>
+<p class="sm">temp: 20–220 · contam: 0–1 · load: 0–100</p>
+<p>Rejects out-of-bounds requests</p>
+</div>
+<div class="c">
+<h3>🚨 Proactive Alerts</h3>
+<p>Auto-refresh every 5s</p>
+<p>Fires before operator asks</p>
+<p>Deduplicated notifications</p>
+</div>
+</div>
+<div class="row">
+<div class="c">
+<h3>💾 Persistent Memory</h3>
+<p>Chat history in SQLite · Survives reloads · Last 20 turns as context</p>
+</div>
+<div class="c">
+<h3>🧠 Reasoning Trace</h3>
+<p>Thoughts + tool calls + results · Expandable in UI · Full auditability</p>
+</div>
+<div class="c">
+<h3>💡 Quick Actions</h3>
+<p>📊 Status · 📉 Trends · 🚨 Failures · 🔮 Predictions</p>
+</div>
+</div>
+</section>
+
+<!-- 9: PINN -->
+<section>
+<h2><span class="a4">Go-Further:</span> PINN</h2>
+<p class="sub">Physics-Informed Neural Network · Replace HeatingElements formula with learned model</p>
+<div class="row">
+<div class="c">
+<h3>🧠 Architecture</h3>
+<div class="f">Input: cumulative_load (1)<br>FC(64)+Tanh → FC(64)+Tanh<br>→ FC(32)+Tanh → FC(1)+Sigmoid<br>Output: health ∈ [0, 1]</div>
+<p class="sm">~5K params · Tanh for smooth autograd</p>
+</div>
+<div class="c">
+<h3>📐 Dual Loss</h3>
+<div class="f">L = L_data + λ·L_physics<br><br>L_data = MSE(pred, true)<br>L_physics = (dH/dx + λ·H)²<br><br>ODE: dH/dt = -λ·load·H</div>
+</div>
+<div class="c">
+<h3>📊 Results</h3>
+<table class="t">
+<tr><td>MAE</td><td style="color:#81c784"><b>0.36%</b></td></tr>
+<tr><td>RMSE</td><td>0.0039</td></tr>
+<tr><td>Max Error</td><td>0.0045</td></tr>
+<tr><td>Physics Loss</td><td>≈ 0</td></tr>
+</table>
+<p class="sm" style="margin-top:6px">Drop-in: <code>Engine(use_pinn=True)</code></p>
+</div>
+</div>
+</section>
+
+<!-- 10: RL AGENT -->
+<section>
+<h2><span class="a4">Go-Further:</span> RL Maintenance Agent</h2>
+<p class="sub">A2C Actor-Critic · Discover optimal policy from pure reward signal</p>
+<div class="row">
+<div class="c">
+<h3>🌍 Environment</h3>
+<div class="f">State (9-dim):<br>&nbsp;[health×3, velocity×3, env×3]<br><br>Action (8 discrete):<br>&nbsp;3-bit → maintain each component<br><br>Reward = Σhealth - 0.5×maint<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- 10×fail (one-time)</div>
+</div>
+<div class="c">
+<h3>🏗️ Network</h3>
+<div class="f">Backbone:<br>&nbsp;FC(9→128, ReLU)<br>&nbsp;FC(128→64, ReLU)<br><br>Actor:  FC(64→8) → π(a|s)<br>Critic: FC(64→1) → V(s)</div>
+<p class="sm">3000 episodes · γ=0.99 · entropy 0.02</p>
+</div>
+<div class="c">
+<h3>🏆 Results</h3>
+<table class="t">
+<tr><td>Failure rate</td><td style="color:#81c784"><b>0%</b></td></tr>
+<tr><td>Survival</td><td>200/200</td></tr>
+<tr><td>vs Rule-based</td><td>Same 0%</td></tr>
+</table>
+<p class="sm" style="margin-top:8px">Zero-failure policy from <b>pure reward</b> — no hand-coded rules</p>
+</div>
+</div>
+</section>
+
+<!-- 11: TESTING -->
+<section>
+<h2>Testing & Quality</h2>
+<div class="row">
+<div class="c" style="flex:1.6">
+<table class="t">
+<tr><th>Suite</th><th>File</th><th>Tests</th><th>Coverage</th></tr>
+<tr><td>Phase 1</td><td>test_model.py</td><td>42</td><td>Math, thresholds, reset, Engine</td></tr>
+<tr><td>Phase 2</td><td>test_engine.py</td><td>25</td><td>Config, StateMachine, DB, Agent</td></tr>
+<tr><td>Phase 3</td><td>test_phase3.py</td><td>25</td><td>Tools, grounding, severity</td></tr>
+<tr><td>PINN</td><td>test_pinn.py</td><td>15</td><td>Shapes, autograd, convergence</td></tr>
+<tr><td>RL</td><td>test_rl_agent.py</td><td>25</td><td>Env, reward, training loop</td></tr>
+<tr><th>Total</th><th></th><th style="color:#81c784">132</th><th></th></tr>
+</table>
+</div>
+<div class="c">
+<h3>Strategy</h3>
+<ul>
+<li><b>Unit:</b> Every formula vs hand-calc</li>
+<li><b>Property:</b> Health ∈ [0,1], monotonic</li>
+<li><b>Integration:</b> Full end-to-end runs</li>
+<li><b>Determinism:</b> Same seed = same output</li>
+<li><b>Regression:</b> Known values locked</li>
+</ul>
+</div>
+</div>
+<div class="row" style="margin-top:6px">
+<div class="c"><h3>🐍 Python 3.10+</h3><p>NumPy · PyTorch</p></div>
+<div class="c"><h3>📊 Streamlit</h3><p>Dashboard + Chat UI</p></div>
+<div class="c"><h3>🤖 OpenAI API</h3><p>GPT-4o-mini · ReAct</p></div>
+<div class="c"><h3>🗄️ SQLite</h3><p>Historian + Chat Memory</p></div>
+</div>
+</section>
+
+<!-- 12: THANK YOU -->
+<section>
+<h1 class="glow-blue" style="margin-bottom:20px">Thank You</h1>
+<p style="font-size:0.7em;color:#7e8cc0">Giorgia Barboni · Murad Hüseynov · Riccardo Bastiani</p>
+<div style="margin:30px 0">
+<span class="tag t1">3 Phases</span>
+<span class="tag t2">132 Tests</span>
+<span class="tag t3">4 AI Tools</span>
+<span class="tag t4">0% Failure Rate</span>
+</div>
+<p style="font-size:0.5em;color:#444;margin-top:30px">github.com/muradhuseynov1/HackUPC-2026</p>
+</section>
+
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@4.6.1/dist/reveal.min.js"></script>
+<script>
+Reveal.initialize({
+  hash:true, slideNumber:'c/t', transition:'slide', backgroundTransition:'fade',
+  width:1280, height:720, margin:0.06, center:true,
+  // Ensure content scales to fit
+  minScale:0.2, maxScale:1.5,
+});
+</script>
+</body>
+</html>
