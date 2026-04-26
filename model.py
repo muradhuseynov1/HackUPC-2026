@@ -10,6 +10,7 @@ No AI/ML, PINNs, or stochastic models. Classical math only.
 from __future__ import annotations
 
 import math
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -296,13 +297,33 @@ class Engine:
     steps deterministically.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, use_pinn: bool = False) -> None:
+        heater: Component
+        if use_pinn:
+            heater = self._load_pinn_heater()
+        else:
+            heater = HeatingElements()
+
         self.components: list[Component] = [
             RecoaterBlade(),
             NozzlePlate(),
-            HeatingElements(),
+            heater,
         ]
         self._step: int = 0
+        self._use_pinn = use_pinn
+
+    @staticmethod
+    def _load_pinn_heater() -> Component:
+        """Load the trained PINN model and return a PINNHeatingElements component."""
+        from pinn_model import PINNHeatingElements, load_pinn
+        model_path = os.path.join(os.path.dirname(__file__), "pinn_heater_model.pt")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"PINN model not found at {model_path}. "
+                f"Train it first: python pinn_model.py"
+            )
+        pinn = load_pinn(model_path)
+        return PINNHeatingElements(pinn)
 
     def update_state(self, inputs: Inputs) -> dict[str, StateReport]:
         """
@@ -350,7 +371,8 @@ class Engine:
             return {"blade_thickness_mm": round(comp.blade_thickness_mm, 4)}
         if isinstance(comp, NozzlePlate):
             return {"clogging_percentage": round(comp.clogging_percentage, 4)}
-        if isinstance(comp, HeatingElements):
+        # HeatingElements or PINNHeatingElements — both have resistance_ohms
+        if hasattr(comp, "resistance_ohms"):
             return {"resistance_ohms": round(comp.resistance_ohms, 4)}
         return {}
 
