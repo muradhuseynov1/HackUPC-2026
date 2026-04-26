@@ -93,7 +93,7 @@ The project implements a three-layer pipeline where each phase consumes the outp
 
 **Source:** `model.py` · **Tests:** `test_model.py` (42 tests)
 
-### 2.1 Design Philosophy
+### 3.1 Design Philosophy
 
 The engine is built as a composable, modular system. Each printer component inherits from an abstract `Component` base class that enforces a uniform interface:
 
@@ -107,7 +107,7 @@ Component (ABC)
 
 This design ensures any component can be added, removed, or replaced (e.g., with a PINN) without affecting the rest of the system.
 
-### 2.2 Data Contract
+### 3.2 Data Contract
 
 **Inputs** — a `@dataclass` with four environmental/operational drivers:
 
@@ -123,10 +123,10 @@ This design ensures any component can be added, removed, or replaced (e.g., with
 | Field | Type | Description |
 |:------|:-----|:------------|
 | `health_index` | `float` | Normalised remaining life [0.0, 1.0] |
-| `operational_status` | `Enum` | `FUNCTIONAL` (≥0.6), `DEGRADED` (≥0.3), `CRITICAL` (>0), `FAILED` (=0) |
+| `operational_status` | `Enum` | `FUNCTIONAL` (>0.7), `DEGRADED` (>0.3), `CRITICAL` (>0.0), `FAILED` (=0.0) |
 | `metrics` | `dict` | Component-specific physical variables |
 
-### 2.3 Degradation Model: RecoaterBlade
+### 3.3 Degradation Model: RecoaterBlade
 
 **Subsystem:** Recoating System
 **Failure mode:** Abrasive Wear
@@ -158,7 +158,7 @@ thickness = FAIL_THICKNESS + health × (INITIAL_THICKNESS - FAIL_THICKNESS)
 
 **Failure condition:** `health = 0` → `thickness = 1.5 mm` → status = `FAILED`
 
-### 2.4 Degradation Model: NozzlePlate
+### 3.4 Degradation Model: NozzlePlate
 
 **Subsystem:** Printhead Array
 **Failure mode:** Clogging & Thermal Fatigue
@@ -200,7 +200,7 @@ This formulation is inspired by the Weibull failure distribution commonly used i
 clogging = (1 - health) × 100%
 ```
 
-### 2.5 Degradation Model: HeatingElements
+### 3.5 Degradation Model: HeatingElements
 
 **Subsystem:** Thermal Control
 **Failure mode:** Electrical Degradation
@@ -237,7 +237,7 @@ resistance = INITIAL_RESISTANCE + (1 - health) × (FAIL_RESISTANCE - INITIAL_RES
 | `INITIAL_RESISTANCE` | 10.0 Ω | Factory-new element |
 | `FAIL_RESISTANCE` | 15.0 Ω | Element can no longer maintain target temperature |
 
-### 2.6 Failure Models Summary
+### 3.6 Failure Models Summary
 
 The specification requires at least two standard failure models. We implemented three:
 
@@ -253,7 +253,7 @@ The specification requires at least two standard failure models. We implemented 
 
 **Source:** `engine.py` + `app.py` · **Tests:** `test_engine.py` (25 tests)
 
-### 3.1 Architecture
+### 4.1 Architecture
 
 The simulation engine implements **Pattern A (Deterministic Replay)** with stochastic noise injection and a proactive maintenance agent:
 
@@ -278,7 +278,7 @@ The simulation engine implements **Pattern A (Deterministic Replay)** with stoch
 └───────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Printer State Machine
+### 4.2 Printer State Machine
 
 The printer cycles through four operational phases, each with distinct environmental profiles:
 
@@ -287,17 +287,16 @@ The printer cycles through four operational phases, each with distinct environme
 | **IDLE** | 25.0 | 0.0 | 0.05 | 10 |
 | **HEATING** | 180.0 | 5.0 | 0.10 | 15 |
 | **PRINTING** | 180.0 | 8.0 | 0.25 | 60 |
-| **COOLDOWN** | 60.0 | 0.5 | 0.08 | 20 |
+| **COOLDOWN** | 25.0 (target) | 0.5 | 0.08 | 20 |
 
 Transitions are: `IDLE → HEATING → PRINTING → COOLDOWN → IDLE → ...`
 
-Temperature transitions use **exponential smoothing** (α = 0.3) to avoid unrealistic instantaneous jumps:
+Temperature transitions use **exponential approach/decay** to avoid unrealistic instantaneous jumps:
 
-```
-smoothed_temp = α × target_temp + (1 - α) × previous_temp
-```
+- **HEATING:** Exponential approach toward target: `temp = 25 + (target - 25) × (1 - e^(-3t/duration))`
+- **COOLDOWN:** Exponential decay back to ambient: `temp = 25 + (prev_temp - 25) × e^(-3t/duration)`
 
-### 3.3 Noise Injection
+### 4.3 Noise Injection
 
 To simulate realistic sensor variance, Gaussian noise is added to each driver at every tick:
 
@@ -307,7 +306,7 @@ To simulate realistic sensor variance, Gaussian noise is added to each driver at
 | Load | N(0, 0.3) units | Mechanical variability |
 | Contamination | N(0, 0.02), clipped [0,1] | Environmental fluctuation |
 
-### 3.4 SimulationConfig (Data Contract)
+### 4.4 SimulationConfig (Data Contract)
 
 ```python
 @dataclass
@@ -317,7 +316,7 @@ class SimulationConfig:
     environmental_profile: Callable | None  # Optional custom driver function
 ```
 
-### 3.5 Historian (SQLite Persistence)
+### 4.5 Historian (SQLite Persistence)
 
 Every tick is persisted to `telemetry.db` with the following schema:
 
@@ -339,7 +338,7 @@ Every tick is persisted to `telemetry.db` with the following schema:
 | `heater_resistance` | REAL | Heater resistance (Ω) |
 | `failure_log` | TEXT | Maintenance/failure event descriptions |
 
-### 3.6 Proactive Maintenance Agent
+### 4.6 Proactive Maintenance Agent
 
 The `ProactiveAgent` is a velocity-based lookahead agent that monitors component health and autonomously triggers maintenance before failure.
 
@@ -355,7 +354,7 @@ The `ProactiveAgent` is a velocity-based lookahead agent that monitors component
 
 This simple one-step lookahead is surprisingly effective: by projecting the decay velocity forward, it catches accelerating failure modes (e.g., the NozzlePlate's super-linear Weibull damage) before they reach FAILED status.
 
-### 3.7 Dashboard (app.py)
+### 4.7 Dashboard (app.py)
 
 A Streamlit-based real-time dashboard provides:
 - **Health gauges** for all three components
@@ -369,7 +368,7 @@ A Streamlit-based real-time dashboard provides:
 
 **Source:** `phase3_chat.py` · **Tests:** `test_phase3.py` (25 tests)
 
-### 4.1 Architecture Pattern: Agentic Diagnosis (Pattern C)
+### 5.1 Architecture Pattern: Agentic Diagnosis (Pattern C)
 
 We implemented the highest-tier pattern (Pattern C) — an agentic ReAct loop where the AI autonomously investigates the historian through multi-step reasoning:
 
@@ -379,13 +378,13 @@ User Query
     ▼
 ┌──────────────┐
 │   LLM Agent  │◀─── System prompt: grounding rules
-│  (GPT-4o)    │
+│ (GPT-4o-mini)│
 └──────┬───────┘
        │ decides to use tool
        ▼
 ┌──────────────┐
-│ get_telemetry│──▸ SQLite query ──▸ telemetry.db
-│   (tool)     │
+│ Tool Dispatch│──▸ SQLite query ──▸ telemetry.db
+│ (4 tools)    │
 └──────┬───────┘
        │ results
        ▼
@@ -394,7 +393,9 @@ User Query
 └──────────────┘
 ```
 
-### 4.2 Grounding Protocol
+The loop runs up to 5 iterations, allowing the AI to chain multiple tool calls for complex multi-step diagnosis.
+
+### 5.2 Grounding Protocol
 
 The system prompt enforces strict grounding rules:
 
@@ -403,9 +404,16 @@ The system prompt enforces strict grounding rules:
 3. **Severity indicators:** Responses are tagged with `INFO`, `WARNING`, or `CRITICAL` severity.
 4. **Run ID awareness:** When multiple simulation runs exist, the AI differentiates between them.
 
-### 4.3 Tool Definition: `get_telemetry`
+### 5.3 Tool Definitions
 
-The AI has access to a single tool that queries the SQLite historian:
+The AI has access to **four tools** for interacting with the Digital Twin:
+
+| Tool | Purpose |
+|:-----|:--------|
+| `get_telemetry` | Query the Phase 2 historian by time range, component, run ID, or latest snapshot |
+| `get_failure_logs` | Retrieve rows where components FAILED or the proactive agent intervened |
+| `get_simulation_config` | Return current SimulationConfig, user overrides, and safety envelope bounds |
+| `adjust_machine_parameter` | Modify a simulation parameter, validated against the safety envelope |
 
 ```python
 def get_telemetry(
@@ -418,11 +426,52 @@ def get_telemetry(
     """Query the Phase 2 historian and return telemetry data."""
 ```
 
-This tool translates natural language queries into structured database lookups, returning timestamped telemetry that the AI uses to ground its response.
+These tools allow the AI to autonomously search, compare, and conclude — the defining characteristic of Pattern C (Agentic Diagnosis).
 
-### 4.4 Reasoning Trace
+### 5.4 Neurosymbolic Safety Firewall
 
-The interface captures and displays the AI's internal reasoning chain in a collapsible "Reasoning Trace" expander, allowing operators (and evaluators) to verify that every conclusion is traceable to specific data points.
+All parameter adjustments via `adjust_machine_parameter` pass through a **deterministic safety envelope** before being applied:
+
+| Parameter | Min | Max |
+|:----------|:----|:----|
+| `temperature_stress` | 20.0 | 220.0 |
+| `contamination` | 0.0 | 1.0 |
+| `operational_load` | 0.0 | 100.0 |
+
+If a requested value falls outside these bounds, the firewall rejects the change and returns a `SAFETY OVERRIDE` message. This is a "neurosymbolic" pattern: the neural (LLM) component proposes actions, but a symbolic (rule-based) layer enforces physical safety constraints.
+
+### 5.5 Proactive Alerting
+
+The interface monitors the historian in the background (via auto-refresh every 5 seconds) and fires alerts when component health crosses danger thresholds:
+
+- **WARNING:** Health ≤ 0.3
+- **CRITICAL:** Health ≤ 0.0 (FAILED)
+
+Alerts are injected into the chat history automatically — the operator does not need to ask. Each alert is deduplicated to prevent repeated notifications for the same event.
+
+### 5.6 Persistent Chat History
+
+Chat messages are persisted to a `chat_history` table in the same SQLite database (`telemetry.db`). This means:
+- Chat history survives page reloads and browser restarts.
+- The AI receives the last 20 messages as context, enabling multi-turn diagnostic conversations.
+- A "Clear Chat History" button resets the persistent store.
+
+### 5.7 Reasoning Trace
+
+The interface captures and displays the AI's internal reasoning chain in a collapsible "Reasoning Trace" expander, showing:
+- **Thoughts:** The AI's intermediate reasoning
+- **Tool Calls:** Which tool was called with what arguments
+- **Tool Results:** Data returned from the historian (truncated for readability)
+
+This allows operators (and evaluators) to verify that every conclusion is traceable to specific data points.
+
+### 5.8 Quick Action Buttons
+
+Four pre-built diagnostic queries are available as one-click buttons:
+- 📊 **System Status** — current health of all components
+- 📉 **Degradation Trends** — health trends over the last 50 data points
+- 🚨 **Failure Analysis** — all failure and maintenance events
+- 🔮 **Predict Failures** — estimated time to CRITICAL for each component
 
 ---
 
@@ -477,7 +526,7 @@ The `get_telemetry()` tool supports four query patterns:
 **Source:** `pinn_model.py` · **Tests:** `test_pinn.py` (15 tests)
 **Phase 1 Go-Further #4:** *"Swap out a hand-tuned formula for a machine learning model."*
 
-### 5.1 Motivation
+### 7.1 Motivation
 
 The HeatingElements' exponential decay formula `H(t) = e^(-λt)` is a closed-form solution to the ODE:
 
@@ -487,7 +536,7 @@ dH/dt = -λ × load × H(t)
 
 A Physics-Informed Neural Network (PINN) can learn this relationship from data while being constrained by the governing physics — combining the flexibility of neural networks with the correctness guarantees of known physical laws.
 
-### 5.2 Architecture
+### 7.2 Architecture
 
 ```
 Input: cumulative_load (scalar)
@@ -507,7 +556,7 @@ Output: predicted_health ∈ [0, 1]
 - **Sigmoid output** — constrains health to [0, 1] by construction.
 - **~5K parameters** — intentionally small; the physics constraint reduces the function space.
 
-### 5.3 Training: Dual Loss Function
+### 7.3 Training: Dual Loss Function
 
 The loss combines data fidelity with physics compliance:
 
@@ -531,14 +580,14 @@ L_physics = (1/N) Σ residual²
 
 The physics loss enforces that the learned function satisfies the governing ODE at every training point, not just at the data points. This is the core innovation of PINNs: the network is constrained to the manifold of physically plausible solutions.
 
-### 5.4 Training Data
+### 7.4 Training Data
 
 100,000 samples generated by running the analytical HeatingElements model with random loads:
 - 500 trajectories × 200 steps each
 - Load sampled uniformly from [0.5, 25.0] per step
 - Data exists only in memory during training (no file I/O)
 
-### 5.5 Results
+### 7.5 Results
 
 | Metric | Value |
 |:-------|:------|
@@ -549,7 +598,7 @@ The physics loss enforces that the learned function satisfies the governing ODE 
 
 The PINN achieves sub-1% error across the entire input domain and **perfectly satisfies the governing ODE** — the physics residual converges to machine epsilon.
 
-### 5.6 Integration
+### 7.6 Integration
 
 The PINN is integrated as a drop-in replacement via `Engine(use_pinn=True)`:
 
@@ -570,7 +619,7 @@ The `PINNHeatingElements` class inherits from `Component` and maintains an ident
 **Source:** `rl_agent.py` · **Tests:** `test_rl_agent.py` (25 tests)
 **Phase 2 Go-Further #4:** *"Train an RL agent to discover the optimal maintenance policy."*
 
-### 6.1 Environment Design (PrinterEnv)
+### 8.1 Environment Design (PrinterEnv)
 
 The physics engine is wrapped in a Gym-like environment:
 
@@ -601,7 +650,7 @@ reward = Σ health_i              ← continuous uptime signal [0–3]
 
 **Episode termination:** on ANY component failure or after 200 steps. This teaches the agent that prevention is critical.
 
-### 6.2 A2C Actor-Critic Architecture
+### 8.2 A2C Actor-Critic Architecture
 
 ```
 Shared backbone:
@@ -617,11 +666,11 @@ Critic head: FC(64, 1) → V(s)
 - Gradient clipping: max norm 0.5
 - Learning rate: 1e-3 with Adam optimiser
 
-### 6.3 Results
+### 8.3 Results
 
 | Metric | Value |
 |:-------|:------|
-| Training reward (5000 ep) | ~340–400 avg (converged) |
+| Training reward (3000 ep) | ~340–400 avg (converged) |
 | Failure rate | **0%** — agent learned to prevent all failures |
 | Episode survival | 200/200 steps (full episode) |
 | vs Rule-based agent | 12.5% lower reward (over-maintains) |
@@ -632,7 +681,7 @@ The RL agent independently discovered a zero-failure maintenance policy from pur
 
 ## 9. Failure Analysis
 
-### 7.1 Failure Timeline (Without Maintenance)
+### 9.1 Failure Timeline (Without Maintenance)
 
 Running the simulation without the ProactiveAgent, components fail in a predictable sequence:
 
@@ -642,7 +691,7 @@ Running the simulation without the ProactiveAgent, components fail in a predicta
 | **RecoaterBlade** | ~50 ticks | ~70 ticks | Elevated contamination during PRINTING accelerates linear wear |
 | **HeatingElements** | ~80 ticks | ~120 ticks | Cumulative operational load during PRINTING causes exponential decay |
 
-### 7.2 Failure Mechanisms
+### 9.2 Failure Mechanisms
 
 **NozzlePlate fails first** because:
 - During the PRINTING phase, temperature = 180°C, far exceeding the 25°C optimal threshold.
@@ -659,7 +708,7 @@ Running the simulation without the ProactiveAgent, components fail in a predicta
 - Failure requires cumulative_load ≈ 575 to reach health = 0.01 (CRITICAL+).
 - At 8.0 load/tick during PRINTING (60 ticks per cycle), this takes approximately two full printer cycles.
 
-### 7.3 With Proactive Maintenance
+### 9.3 With Proactive Maintenance
 
 The `ProactiveAgent` with `critical_threshold = 0.15` intervenes before any component fails:
 - **NozzlePlate:** Maintained most frequently (every ~5–8 printing ticks) due to rapid Weibull degradation.
@@ -742,21 +791,21 @@ All tuning constants are exposed as class-level or dataclass attributes:
 
 ## 12. Challenges & Lessons Learned
 
-### 8.1 RL Agent Reward Divergence
+### 12.1 RL Agent Reward Divergence
 
 **Challenge:** The initial RL agent's reward diverged to -14,000 per episode.
 **Root cause:** The failure penalty was applied *every step* a component remained failed (compounding to -7,500 for 150 steps), creating a negative reward spiral.
 **Solution:** Three changes — (1) one-time failure penalty via `_failed_set` tracking, (2) continuous health-proportional reward instead of binary alive/dead, (3) episode termination on first failure.
 
-### 8.2 PINN Physics Loss
+### 12.2 PINN Physics Loss
 
 **Challenge:** Initially, the physics loss appeared to be zero from epoch 1, which seemed suspicious.
 **Explanation:** The PINN's architecture (Tanh activations + Sigmoid output) naturally biases toward smooth, monotonically decreasing functions. The exponential decay `e^(-λx)` is precisely such a function, so the network satisfies the ODE almost immediately. The data loss is what drives the network to learn the *correct* decay constant, while the physics loss acts as a regulariser preventing non-physical solutions.
 
-### 8.3 State Machine Temperature Smoothing
+### 12.3 State Machine Temperature Smoothing
 
 **Challenge:** Instantaneous temperature jumps from 25°C (IDLE) to 180°C (HEATING) caused unrealistic spikes in the NozzlePlate's Weibull damage.
-**Solution:** Exponential smoothing (`α = 0.3`) creates a gradual temperature ramp, modelling realistic thermal inertia.
+**Solution:** Exponential approach/decay functions (`e^(-3t/duration)`) create a gradual temperature ramp during HEATING and COOLDOWN, modelling realistic thermal inertia.
 
 ---
 
