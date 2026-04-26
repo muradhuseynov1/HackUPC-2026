@@ -30,6 +30,14 @@ from model import Engine as PhysicsEngine
 from model import Inputs
 from typing import Callable
 
+# RL agent (optional — works without PyTorch installed)
+try:
+    import torch
+    from rl_agent import ActorCritic
+    _RL_AVAILABLE = True
+except ImportError:
+    _RL_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -336,22 +344,102 @@ class ProactiveAgent:
 
 
 # ---------------------------------------------------------------------------
+# RL Maintenance Agent Adapter (Go-Further)
+# ---------------------------------------------------------------------------
+
+RL_WEIGHTS_PATH = Path(__file__).parent / "rl_maintenance_agent.pt"
+
+
+class RLMaintenanceAgent:
+    """
+    Adapter that uses the trained A2C policy to make maintenance decisions
+    inside the live simulation loop.
+
+    Same evaluate_and_act interface as ProactiveAgent so both can be
+    swapped transparently.
+    """
+
+    COMPONENT_ORDER = ["RecoaterBlade", "NozzlePlate", "HeatingElements"]
+
+    def __init__(self, weights_path: Path = RL_WEIGHTS_PATH) -> None:
+        if not _RL_AVAILABLE:
+            raise RuntimeError(
+                "PyTorch is required for the RL agent. "
+                "Install with: pip install torch"
+            )
+        self.model = ActorCritic(state_dim=9, action_dim=8)
+        if weights_path.exists():
+            self.model.load_state_dict(
+                torch.load(str(weights_path), map_location="cpu", weights_only=True)
+            )
+            print(f"[engine] Loaded RL weights from {weights_path}")
+        else:
+            print(f"[engine] WARNING: RL weights not found at {weights_path}, using random policy")
+        self.model.eval()
+        self._prev_health = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+
+    def decide(
+        self,
+        healths: dict[str, float],
+        temperature: float,
+        load: float,
+        contamination: float,
+    ) -> dict[str, bool]:
+        """
+        Build RL state vector, run inference, return maintenance decisions.
+
+        Returns dict like {"RecoaterBlade": True, "NozzlePlate": False, ...}
+        """
+        h = np.array(
+            [healths[n] for n in self.COMPONENT_ORDER], dtype=np.float32
+        )
+        velocities = h - self._prev_health
+        self._prev_health = h.copy()
+
+        norm_temp = min(temperature / 200.0, 1.0)
+        norm_load = min(load / 20.0, 1.0)
+        norm_cont = float(np.clip(contamination, 0.0, 1.0))
+
+        state = np.concatenate([h, velocities, [norm_temp, norm_load, norm_cont]])
+        state_t = torch.FloatTensor(state).unsqueeze(0)
+
+        with torch.no_grad():
+            probs, _ = self.model(state_t)
+            action = probs.argmax(dim=-1).item()  # greedy in live mode
+
+        return {
+            "RecoaterBlade": bool(action & 1),
+            "NozzlePlate": bool(action & 2),
+            "HeatingElements": bool(action & 4),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Main simulation loop
 # ---------------------------------------------------------------------------
 
-async def run_simulation(config: SimulationConfig) -> None:
+async def run_simulation(config: SimulationConfig, *, use_rl_agent: bool = False) -> None:
     """Async loop: bounded by SimulationConfig, tick state machine, add noise, run physics, persist."""
 
     run_id = uuid.uuid4().hex[:12]
+    agent_label = "RL (A2C)" if use_rl_agent else "Rule-based (ProactiveAgent)"
     print(f"[engine] Starting run {run_id}  (DB: {DB_PATH})")
     print(f"[engine] Duration: {config.total_duration}  Step: {config.time_step}")
+    print(f"[engine] Maintenance agent: {agent_label}")
 
     conn = sqlite3.connect(str(DB_PATH))
     _init_db(conn)
 
     physics = PhysicsEngine()
     sm = StateMachine()
-    agent = ProactiveAgent(critical_threshold=0.15)
+
+    # Select maintenance agent
+    rl_agent_instance: RLMaintenanceAgent | None = None
+    rule_agent: ProactiveAgent | None = None
+    if use_rl_agent:
+        rl_agent_instance = RLMaintenanceAgent()
+    else:
+        rule_agent = ProactiveAgent(critical_threshold=0.15)
     rng = np.random.default_rng(seed=None)  # real randomness for sensor noise
 
     current_time = 0.0
@@ -391,33 +479,62 @@ async def run_simulation(config: SimulationConfig) -> None:
         nozzle_h = reports["NozzlePlate"].health_index
         heater_h = reports["HeatingElements"].health_index
 
-        # 5. Proactive Maintenance Agent -- evaluate each component
+        # 5. Maintenance Agent -- evaluate each component
         #    Runs AFTER physics but BEFORE DB write.
         #    If the agent intervenes, it resets health to 1.0 and
         #    also resets the corresponding physics component.
         now_str = datetime.now(timezone.utc).isoformat()
         agent_logs: list[str] = []
 
-        blade_h, blade_maint, blade_log = agent.evaluate_and_act("RecoaterBlade", blade_h)
-        if blade_maint:
-            for comp in physics.components:
-                if comp.name == "RecoaterBlade":
-                    comp.reset()
-            agent_logs.append(blade_log)
+        if rl_agent_instance is not None:
+            # --- RL Agent path ---
+            decisions = rl_agent_instance.decide(
+                healths={"RecoaterBlade": blade_h, "NozzlePlate": nozzle_h, "HeatingElements": heater_h},
+                temperature=temperature,
+                load=load,
+                contamination=contamination,
+            )
+            for comp_name, should_maintain in decisions.items():
+                if should_maintain:
+                    for comp in physics.components:
+                        if comp.name == comp_name:
+                            old_h = comp.health
+                            comp.reset()
+                    # Update local health vars after reset
+                    if comp_name == "RecoaterBlade":
+                        blade_h = 1.0
+                    elif comp_name == "NozzlePlate":
+                        nozzle_h = 1.0
+                    elif comp_name == "HeatingElements":
+                        heater_h = 1.0
+                    msg = (
+                        f"[RL-AGENT] Maintained {comp_name} "
+                        f"at {old_h:.2f} health."
+                    )
+                    agent_logs.append(msg)
+        else:
+            # --- Rule-based ProactiveAgent path ---
+            assert rule_agent is not None
+            blade_h, blade_maint, blade_log = rule_agent.evaluate_and_act("RecoaterBlade", blade_h)
+            if blade_maint:
+                for comp in physics.components:
+                    if comp.name == "RecoaterBlade":
+                        comp.reset()
+                agent_logs.append(blade_log)
 
-        nozzle_h, nozzle_maint, nozzle_log = agent.evaluate_and_act("NozzlePlate", nozzle_h)
-        if nozzle_maint:
-            for comp in physics.components:
-                if comp.name == "NozzlePlate":
-                    comp.reset()
-            agent_logs.append(nozzle_log)
+            nozzle_h, nozzle_maint, nozzle_log = rule_agent.evaluate_and_act("NozzlePlate", nozzle_h)
+            if nozzle_maint:
+                for comp in physics.components:
+                    if comp.name == "NozzlePlate":
+                        comp.reset()
+                agent_logs.append(nozzle_log)
 
-        heater_h, heater_maint, heater_log = agent.evaluate_and_act("HeatingElements", heater_h)
-        if heater_maint:
-            for comp in physics.components:
-                if comp.name == "HeatingElements":
-                    comp.reset()
-            agent_logs.append(heater_log)
+            heater_h, heater_maint, heater_log = rule_agent.evaluate_and_act("HeatingElements", heater_h)
+            if heater_maint:
+                for comp in physics.components:
+                    if comp.name == "HeatingElements":
+                        comp.reset()
+                agent_logs.append(heater_log)
 
         # 6. Build failure / maintenance log string
         failures: list[str] = []
@@ -476,17 +593,26 @@ async def run_simulation(config: SimulationConfig) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Default SimulationConfig: 500 time-units, 1.0 per tick
+    import argparse as _ap
+
+    parser = _ap.ArgumentParser(description="HP Metal Jet S100 Simulation Engine")
+    parser.add_argument("--duration", type=float, default=500.0, help="Total simulation duration")
+    parser.add_argument("--step", type=float, default=1.0, help="Time step per tick")
+    parser.add_argument("--rl", action="store_true", help="Use RL agent instead of rule-based ProactiveAgent")
+    args = parser.parse_args()
+
     default_config = SimulationConfig(
-        total_duration=500.0,
-        time_step=1.0,
+        total_duration=args.duration,
+        time_step=args.step,
     )
 
+    agent_str = "RL (A2C)" if args.rl else "Rule-based (ProactiveAgent)"
     print("=" * 60)
     print("  HP Metal Jet S100 - Simulation Engine  (Phase 2)")
     print(f"  Duration: {default_config.total_duration}  Step: {default_config.time_step}")
+    print(f"  Agent: {agent_str}")
     print("=" * 60)
     try:
-        asyncio.run(run_simulation(default_config))
+        asyncio.run(run_simulation(default_config, use_rl_agent=args.rl))
     except KeyboardInterrupt:
         print("\n[engine] Stopped by user.")
